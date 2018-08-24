@@ -1,23 +1,26 @@
 package rewrite
 
-import "net/http"
-import "net/url"
-import "strings"
-import "regexp"
-import "path"
-import "fmt"
+import (
+	"fmt"
+	"net/http"
+	"net/url"
+	"path"
+	"regexp"
+	"strings"
+)
 
 const headerField = "X-Rewrite-Original-URI"
 
 type Rule struct {
-	Pattern string
-	To      string
+	Pattern  string
+	To       string
+	Redirect bool
 	*regexp.Regexp
 }
 
 var regfmt = regexp.MustCompile(`:[^/#?()\.\\]+`)
 
-func NewRule(pattern, to string) (*Rule, error) {
+func NewRule(pattern, to string, redirect bool) (*Rule, error) {
 	pattern = regfmt.ReplaceAllStringFunc(pattern, func(m string) string {
 		return fmt.Sprintf(`(?P<%s>[^/#?]+)`, m[1:])
 	})
@@ -30,6 +33,7 @@ func NewRule(pattern, to string) (*Rule, error) {
 	return &Rule{
 		pattern,
 		to,
+		redirect,
 		reg,
 	}, nil
 }
@@ -60,7 +64,7 @@ func (r *Rule) Rewrite(req *http.Request) bool {
 }
 
 func (r *Rule) Replace(u *url.URL) string {
-	if !hit("\\$|\\:", r.To) {
+	if !r.Hit("\\$|\\:", r.To) {
 		return r.To
 	}
 
@@ -73,7 +77,7 @@ func (r *Rule) Replace(u *url.URL) string {
 
 	str := string(result[:])
 
-	if hit("\\:", str) {
+	if r.Hit("\\:", str) {
 		return r.replaceNamedParams(uri, str)
 	}
 
@@ -96,39 +100,27 @@ func (r *Rule) replaceNamedParams(from, to string) string {
 	return to
 }
 
-func NewHandler(rules map[string]string) RewriteHandler {
-	var h RewriteHandler
-
-	for key, val := range rules {
-		r, e := NewRule(key, val)
-		if e != nil {
-			panic(e)
-		}
-
-		h.rules = append(h.rules, r)
-	}
-
-	return h
-}
-
-type RewriteHandler struct {
-	rules []*Rule
-}
-
-func (h *RewriteHandler) ServeHTTP(res http.ResponseWriter, req *http.Request) {
-	for _, r := range h.rules {
-		ok := r.Rewrite(req)
-		if ok {
-			break
-		}
-	}
-}
-
-func hit(pattern, str string) bool {
-	r, e := regexp.MatchString(pattern, str)
+func (r *Rule) Hit(pattern, str string) bool {
+	ok, e := regexp.MatchString(pattern, str)
 	if e != nil {
 		return false
 	}
 
-	return r
+	return ok
+}
+func HeaderRewrite(rules []*Rule, h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, rw := range rules {
+			//old := r.URL.String()
+			if rw.Rewrite(r) {
+				//fmt.Printf("rule:%s %+v %+v\n", rw.Pattern, old, r.URL.String())
+				if rw.Redirect {
+					http.Redirect(w, r, r.URL.Path, 302)
+					return
+				}
+				break
+			}
+		}
+		h.ServeHTTP(w, r)
+	})
 }
